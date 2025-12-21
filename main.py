@@ -158,7 +158,7 @@ def parse_args():
     parser.add_argument(
         "--keep-prev",
         action="store_true",
-        help="Keep previous output instead of replacing it"
+        help="Keep previous output instead of replacing it",
     )
 
     return parser.parse_args()
@@ -193,6 +193,7 @@ SERIES_DIR = os.path.join(BASE_OUTPUT_DIR, "series")
 def safe_filename(name: str) -> str:
     return re.sub(r'[\\/*?:"<>|]', "_", name).strip()
 
+
 def prepare_sub_output(base_dir: str, sub_dir: str, keep_prev: bool):
     """
     Prepares output/<sub_dir> directory.
@@ -217,6 +218,7 @@ def prepare_sub_output(base_dir: str, sub_dir: str, keep_prev: bool):
         os.rename(target, prev)
 
     os.makedirs(target, exist_ok=True)
+
 
 def is_valid_channel(name: str) -> bool:
     if not name:
@@ -250,11 +252,10 @@ def write_m3u(path: str, lines: list[str]):
 
 
 def export_live_streams():
-    if args.txt:
+    if EXPORT_TXT:
         prepare_sub_output(BASE_OUTPUT_DIR, "txt", KEEP_PREV)
-    if args.m3u:
+    else:
         prepare_sub_output(BASE_OUTPUT_DIR, "m3u", KEEP_PREV)
-
 
     categories_data = categories(LIVE_TYPE)
     if not categories_data:
