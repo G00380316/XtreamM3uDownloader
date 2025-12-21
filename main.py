@@ -99,6 +99,7 @@ Fix:
 ====================================================
 """
 
+
 def ensure_venv():
     """
     Warn if the script is not running inside a virtual environment.
@@ -113,6 +114,7 @@ def ensure_venv():
             "  pip install -r requirements.txt\n"
         )
 
+
 load_dotenv()
 
 urls.SERVER = os.getenv("SERVER")
@@ -122,33 +124,40 @@ urls.PASSWORD = os.getenv("PASSWORD")
 if not all([urls.SERVER, urls.USERNAME, urls.PASSWORD]):
     raise RuntimeError("Missing SERVER / USERNAME / PASSWORD in .env")
 
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Xtream Codes IPTV exporter (TXT / M3U)"
     )
 
-    parser.add_argument("--container", default="ts",
-                        choices=["ts", "m3u8"],
-                        help="Stream container type (default: ts)")
+    parser.add_argument(
+        "--container",
+        default="ts",
+        choices=["ts", "m3u8"],
+        help="Stream container type (default: ts)",
+    )
 
-    parser.add_argument("--txt", action="store_true",
-                        help="Export TXT playlists")
+    parser.add_argument("--txt", action="store_true", help="Export TXT playlists")
 
-    parser.add_argument("--m3u", action="store_true",
-                        help="Export M3U playlists")
+    parser.add_argument("--m3u", action="store_true", help="Export M3U playlists")
 
-    parser.add_argument("--full", action="store_true",
-                        help="Generate single full playlist instead of category split")
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help="Generate single full playlist instead of category split",
+    )
 
-    parser.add_argument("--output", default="output",
-                        help="Base output directory (default: output)")
+    parser.add_argument(
+        "--output", default="output", help="Base output directory (default: output)"
+    )
 
     return parser.parse_args()
+
 
 args = parse_args()
 
 OUTPUT_CONTAINER = args.container
-EXPORT_TXT = args.txt or not args.m3u     # default TXT if nothing specified
+EXPORT_TXT = args.txt or not args.m3u  # default TXT if nothing specified
 EXPORT_M3U = args.m3u
 SPLIT_BY_CATEGORY = not args.full
 
@@ -157,6 +166,8 @@ TXT_DIR = os.path.join(BASE_OUTPUT_DIR, "txt")
 M3U_DIR = os.path.join(BASE_OUTPUT_DIR, "m3u")
 
 SEPARATOR = ";\n"
+LIVE_TYPE = "live"
+
 
 def safe_filename(name: str) -> str:
     return re.sub(r'[\\/*?:"<>|]', "_", name).strip()
@@ -191,6 +202,7 @@ def write_m3u(path: str, lines: list[str]):
             name, url = line.split(",", 1)
             f.write(f"#EXTINF:-1,{name.strip()}\n")
             f.write(f"{url.strip()}\n")
+
 
 def export_live_streams():
     os.makedirs(TXT_DIR, exist_ok=True)
@@ -253,6 +265,7 @@ def export_live_streams():
         print(f"Wrote full playlist → {total} channels")
 
     print(f"\nTotal exported channels: {total}")
+
 
 if __name__ == "__main__":
     ensure_venv()
