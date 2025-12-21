@@ -13,7 +13,7 @@ Optimized for **VLC (iOS/macOS)** and large playlists.
 - Filters fake/header channels (####)
 - Loads credentials from `.env`
 - Command-line flags (no code edits required)
-- Handles 15k+ channels
+- Handles 15k+ channels / movies / series
 
 ---
 
@@ -45,7 +45,7 @@ USERNAME=your_username
 PASSWORD=your_password
 ```
 
-***Do not commit .env to Git.***
+**_Do not commit .env to Git._**
 
 ### Usage
 
@@ -74,16 +74,24 @@ python main.py --full
 python main.py --container m3u8
 ```
 ```
-
-```
-## Output
-
-output/
-├── txt/
-│   └── *.txt
-├── m3u/
-│   └── *.m3u
-├── all.txt
-└── all.m3u
 ```
 
+- Export movies (VOD)
+```bash
+python main.py --vod
+```
+
+- Export series
+```bash
+python main.py --series
+```
+
+- Keep previous output
+```bash
+python main.py --keep-prev
+```
+
+- Mixed exports
+```bash
+python main.py --live --vod --series --m3u
+```
