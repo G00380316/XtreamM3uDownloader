@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any
-from urllib.parse import urlencode
+from typing import Any, Literal
+from urllib.parse import quote, urlencode
 
 import requests
 from requests.exceptions import RequestException, Timeout
@@ -17,6 +17,8 @@ READ_TIMEOUT = 60
 RETRIES = 3
 RETRY_SLEEP = 2
 
+BackupMatchMode = Literal["mirror", "name", "merge"]
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_10_3) "
@@ -24,6 +26,24 @@ HEADERS = {
         "Chrome/44.0.2403.89 Safari/537.36"
     )
 }
+
+
+def normalize_stream_match_mode(value: str) -> BackupMatchMode:
+    """Validate and normalize a backup stream-match mode for type checkers."""
+    clean_value = value.strip().lower()
+
+    if clean_value == "mirror":
+        return "mirror"
+
+    if clean_value == "name":
+        return "name"
+
+    if clean_value == "merge":
+        return "merge"
+
+    raise ValueError(
+        f"stream_match must be 'mirror', 'name', or 'merge', got {value!r}"
+    )
 
 
 def normalize_server(server: str) -> str:
@@ -41,18 +61,30 @@ def normalize_server(server: str) -> str:
 
 @dataclass(frozen=True)
 class Provider:
-    """Xtream provider connection details."""
+    """Xtream provider connection details.
+
+    stream_match controls how this provider is used as a backup:
+      - mirror: reuse primary stream IDs on this server/domain.
+      - name: fetch this provider's own categories/streams and match by channel name.
+      - merge: fetch this provider with the same filters and append its channels.
+
+    The primary provider can leave stream_match as mirror; it only matters for backups.
+    """
 
     server: str
     username: str
     password: str
     name: str = "Primary"
+    stream_match: BackupMatchMode = "mirror"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "server", normalize_server(self.server))
         object.__setattr__(self, "username", self.username.strip())
         object.__setattr__(self, "password", self.password.strip())
         object.__setattr__(self, "name", self.name.strip() or "Provider")
+        object.__setattr__(
+            self, "stream_match", normalize_stream_match_mode(str(self.stream_match))
+        )
 
         if not self.username:
             raise ValueError(f"{self.name}: username cannot be empty")
@@ -65,6 +97,7 @@ class XtreamClient:
     def __init__(self, provider: Provider):
         self.provider = provider
         self.session = requests.Session()
+        self._categories_cache: dict[str, list[dict[str, Any]]] = {}
 
     def api_get(
         self,
@@ -121,6 +154,9 @@ class XtreamClient:
         return default
 
     def categories(self, stream_type: str) -> list[dict[str, Any]]:
+        if stream_type in self._categories_cache:
+            return self._categories_cache[stream_type]
+
         action_map = {
             LIVE_TYPE: "get_live_categories",
             VOD_TYPE: "get_vod_categories",
@@ -132,7 +168,9 @@ class XtreamClient:
             return []
 
         data = self.api_get(action, default=[], label=f"{stream_type} categories")
-        return data if isinstance(data, list) else []
+        categories = data if isinstance(data, list) else []
+        self._categories_cache[stream_type] = categories
+        return categories
 
     def streams_by_category(
         self, stream_type: str, category_id: str
@@ -180,19 +218,20 @@ class XtreamClient:
         if not path:
             return None
 
+        # Encode path parts so special characters in credentials do not break URLs.
+        username = quote(self.provider.username, safe="")
+        password = quote(self.provider.password, safe="")
+        stream_id = quote(str(stream_id), safe="")
+        container_extension = container_extension.lstrip(".")
+
         return (
             f"{self.provider.server}/{path}/"
-            f"{self.provider.username}/{self.provider.password}/"
+            f"{username}/{password}/"
             f"{stream_id}.{container_extension}"
         )
 
     def build_epg_url(self) -> str:
-        """Return this provider's XMLTV/EPG URL.
-
-        This is written into the M3U header by main.py as x-tvg-url/url-tvg/tvg-url.
-        Most IPTV apps keep the M3U channel list and XMLTV guide separate, so the
-        playlist points to this URL instead of embedding the guide data.
-        """
+        """Return this provider's XMLTV/EPG URL."""
         params = urlencode(
             {
                 "username": self.provider.username,

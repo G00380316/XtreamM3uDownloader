@@ -1,23 +1,60 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import os
 import re
 import shutil
 import sys
+import unicodedata
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Literal
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from dotenv import load_dotenv
 
-from urls import LIVE_TYPE, SERIES_TYPE, VOD_TYPE, Provider, XtreamClient
+from urls import (
+    LIVE_TYPE,
+    SERIES_TYPE,
+    VOD_TYPE,
+    BackupMatchMode,
+    Provider,
+    XtreamClient,
+)
 
 SEPARATOR = ";\n"
 DEFAULT_OUTPUT = "output"
+BackupMatchArg = Literal["auto", "mirror", "name", "merge"]
 
 
 class ConfigError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class BackupSpec:
+    client: XtreamClient
+    explicit_credentials: bool
+
+
+@dataclass
+class BackupCandidate:
+    stream: dict[str, Any]
+    category_name: str
+    key: str
+    tokens: frozenset[str]
+    numbers: frozenset[str]
+
+
+@dataclass
+class BackupIndex:
+    client: XtreamClient
+    streams_by_key: dict[str, list[BackupCandidate]]
+    candidates: list[BackupCandidate]
+    matched: int = 0
+    fuzzy_matched: int = 0
+    missed: int = 0
 
 
 def safe_filename(name: str) -> str:
@@ -68,15 +105,16 @@ def m3u_escape(value: str | None) -> str:
 
 
 def write_m3u(
-    path: Path, entries: list[dict[str, Any]], epg_urls: list[str] | None = None
+    path: Path,
+    entries: list[dict[str, Any]],
+    epg_urls: list[str] | None = None,
+    epg_header_mode: Literal["single", "compat"] = "compat",
 ) -> None:
     """Write an M3U playlist.
 
-    If epg_urls is provided, the playlist header points IPTV players to XMLTV.
-    Several attribute names are written for better player compatibility:
-      - x-tvg-url
-      - url-tvg
-      - tvg-url
+    The M3U header points IPTV players to XMLTV/EPG when epg_urls is provided.
+    The playlist still keeps the actual guide separate, which is how most IPTV
+    apps expect M3U + XMLTV to work.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     epg_urls = [url.strip() for url in (epg_urls or []) if url and url.strip()]
@@ -84,11 +122,16 @@ def write_m3u(
 
     with path.open("w", encoding="utf-8") as file:
         if epg_value:
-            file.write(
-                f'#EXTM3U x-tvg-url="{epg_value}" '
-                f'url-tvg="{epg_value}" '
-                f'tvg-url="{epg_value}"\n'
-            )
+            if epg_header_mode == "single":
+                file.write(f'#EXTM3U x-tvg-url="{epg_value}"\n')
+            else:
+                # x-tvg-url is the most common attribute. url-tvg/tvg-url are also
+                # included for compatibility with players that prefer those names.
+                file.write(
+                    f'#EXTM3U x-tvg-url="{epg_value}" '
+                    f'url-tvg="{epg_value}" '
+                    f'tvg-url="{epg_value}"\n'
+                )
         else:
             file.write("#EXTM3U\n")
 
@@ -125,6 +168,7 @@ def prompt_backup_servers() -> list[str]:
     print("Examples:")
     print("  http://backup-server:8080")
     print("  http://backup-server:8080|username|password|Backup Name")
+    print("  http://backup-server:8080|username|password|Backup Name|merge")
 
     servers = []
     index = 1
@@ -156,22 +200,102 @@ def load_credentials(args: argparse.Namespace) -> tuple[str, str, str]:
 
 
 def provider_from_string(
-    raw: str, fallback_user: str, fallback_pass: str, index: int
-) -> Provider:
+    raw: str,
+    fallback_user: str,
+    fallback_pass: str,
+    index: int,
+    backup_match: BackupMatchArg = "auto",
+) -> BackupSpec:
     """
     Supported formats:
       http://server:port
       http://server:port|username|password
       http://server:port|username|password|Display Name
+      http://server:port|username|password|Display Name|mirror
+      http://server:port|username|password|Display Name|name
+      http://server:port|username|password|Display Name|merge
+
+    Important behavior:
+      - server only = mirror backup by default, reuse primary stream IDs
+      - server|username|password = separate provider by default, match by name
+      - the optional 5th field overrides --backup-match for this one provider
+      - merge mode fetches backup provider channels using the same filters and appends them
     """
     parts = [part.strip() for part in raw.split("|")]
 
-    server = require_text(parts[0] if parts else None, f"BACKUP_SERVER_{index}")
-    username = parts[1] if len(parts) > 1 and parts[1] else fallback_user
-    password = parts[2] if len(parts) > 2 and parts[2] else fallback_pass
-    name = parts[3] if len(parts) > 3 and parts[3] else f"Backup {index}"
+    if len(parts) not in {1, 3, 4, 5}:
+        raise ConfigError(
+            "Invalid --backup-server format. Use one of:\n"
+            "  http://server:port\n"
+            "  http://server:port|username|password\n"
+            "  http://server:port|username|password|Display Name\n"
+            "  http://server:port|username|password|Display Name|mirror|name|merge"
+        )
 
-    return Provider(server=server, username=username, password=password, name=name)
+    server = require_text(parts[0] if parts else None, f"BACKUP_SERVER_{index}")
+    explicit_credentials = len(parts) >= 3
+
+    if explicit_credentials:
+        username = require_text(parts[1], f"BACKUP_USERNAME_{index}")
+        password = require_text(parts[2], f"BACKUP_PASSWORD_{index}")
+    else:
+        username = fallback_user
+        password = fallback_pass
+
+    name = parts[3] if len(parts) >= 4 and parts[3] else f"Backup {index}"
+    provider_override = parts[4].casefold() if len(parts) == 5 and parts[4] else ""
+
+    mode_source: BackupMatchArg
+    if provider_override:
+        mode_source = normalize_backup_match_arg(provider_override)
+        if mode_source == "auto":
+            raise ConfigError(
+                "Per-backup mode cannot be auto. Use mirror, name, or merge as the 5th field."
+            )
+    else:
+        mode_source = backup_match
+
+    stream_match: BackupMatchMode
+    if mode_source == "auto":
+        stream_match = "name" if explicit_credentials else "mirror"
+    elif mode_source == "mirror":
+        stream_match = "mirror"
+    elif mode_source == "name":
+        stream_match = "name"
+    elif mode_source == "merge":
+        stream_match = "merge"
+    else:
+        raise ConfigError("--backup-match must be auto, mirror, name, or merge")
+
+    return BackupSpec(
+        client=XtreamClient(
+            Provider(
+                server=server,
+                username=username,
+                password=password,
+                name=name,
+                stream_match=stream_match,
+            )
+        ),
+        explicit_credentials=explicit_credentials,
+    )
+
+
+def normalize_backup_match_arg(value: str) -> BackupMatchArg:
+    """Validate argparse's string value and return a literal-friendly mode."""
+    if value == "auto":
+        return "auto"
+
+    if value == "mirror":
+        return "mirror"
+
+    if value == "name":
+        return "name"
+
+    if value == "merge":
+        return "merge"
+
+    raise ConfigError("--backup-match must be auto, mirror, name, or merge")
 
 
 REGEX_META_CHARS = set(r".\^$*+?{}[]|()")
@@ -260,6 +384,182 @@ def channel_is_allowed(
     return True
 
 
+QUALITY_TOKENS = {
+    "sd",
+    "hd",
+    "fhd",
+    "uhd",
+    "4k",
+    "8k",
+    "raw",
+    "hevc",
+    "h265",
+    "h264",
+    "vip",
+    "dolby",
+    "audio",
+    "50fps",
+    "60fps",
+    "720p",
+    "1080p",
+    "2160p",
+    "3840p",
+}
+
+CHANNEL_PREFIX_TOKENS = {
+    "uk",
+    "gb",
+    "us",
+    "usa",
+    "ie",
+    "irl",
+    "ireland",
+    "united",
+    "kingdom",
+}
+
+CHANNEL_NOISE_TOKENS = {
+    "channel",
+    "channels",
+    "backup",
+    "source",
+}
+
+CHANNEL_TOKEN_ALIASES = {
+    "sports": "sport",
+    "sporting": "sport",
+    "futbol": "football",
+    "fútbol": "football",
+    "soccer": "football",
+    "plus": "plus",
+    "+": "plus",
+}
+
+
+def normalize_channel_token(token: str) -> str:
+    token = CHANNEL_TOKEN_ALIASES.get(token, token)
+
+    # Keep channel numbers intact, but collapse simple plural words. This helps
+    # names like "Sky Sports Main Event" match "SKY SPORT MAIN EVENT FHD".
+    if token.endswith("s") and len(token) > 3 and not token.endswith("ss"):
+        token = token[:-1]
+
+    return CHANNEL_TOKEN_ALIASES.get(token, token)
+
+
+def normalize_channel_key(name: str) -> str:
+    """Return a stable key for matching the same channel across providers.
+
+    The key intentionally removes provider/country/quality noise such as UK,
+    FHD, 4K, RAW, HEVC, VIP, and punctuation, while keeping channel numbers.
+    It is a little forgiving because different providers name the same channel
+    differently.
+    """
+    text = unicodedata.normalize("NFKD", name or "")
+    text = text.casefold()
+    text = text.replace("&", " and ").replace("+", " plus ")
+    text = re.sub(r"\[[^\]]*\]|\([^)]*\)|\{[^}]*\}", " ", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+
+    tokens: list[str] = []
+    for raw_token in text.split():
+        token = normalize_channel_token(raw_token)
+        if token in QUALITY_TOKENS:
+            continue
+        if token in CHANNEL_PREFIX_TOKENS:
+            continue
+        if token in CHANNEL_NOISE_TOKENS:
+            continue
+        tokens.append(token)
+
+    return " ".join(tokens)
+
+
+def channel_key_tokens(key: str) -> frozenset[str]:
+    return frozenset(token for token in key.split() if token)
+
+
+def channel_key_numbers(key: str) -> frozenset[str]:
+    return frozenset(re.findall(r"\d+", key))
+
+
+def channel_name_match_score(primary_key: str, candidate: BackupCandidate) -> float:
+    """Score how likely a backup candidate is the same channel.
+
+    Exact normalized matches still win, but this also catches common provider
+    naming differences. Number mismatches are blocked so "TNT Sport 1" does not
+    match "TNT Sport 2".
+    """
+    if not primary_key or not candidate.key:
+        return 0.0
+
+    if primary_key == candidate.key:
+        return 1.0
+
+    primary_numbers = channel_key_numbers(primary_key)
+    if primary_numbers and candidate.numbers and primary_numbers != candidate.numbers:
+        return 0.0
+
+    primary_tokens = channel_key_tokens(primary_key)
+    if not primary_tokens or not candidate.tokens:
+        return 0.0
+
+    shared = primary_tokens & candidate.tokens
+    if not shared:
+        return 0.0
+
+    token_ratio = (2 * len(shared)) / (len(primary_tokens) + len(candidate.tokens))
+    containment = len(shared) / min(len(primary_tokens), len(candidate.tokens))
+    sequence_ratio = difflib.SequenceMatcher(None, primary_key, candidate.key).ratio()
+
+    # If the shorter name is fully contained in the longer one and it has enough
+    # useful words, treat it as a strong match. Example: "espn plus" vs
+    # "usa espn plus event 1" after normalization.
+    contained_score = 0.0
+    if containment == 1.0 and min(len(primary_tokens), len(candidate.tokens)) >= 2:
+        contained_score = 0.92
+
+    return max(sequence_ratio, token_ratio, containment * 0.90, contained_score)
+
+
+def find_best_backup_match(
+    primary_key: str,
+    backup_index: BackupIndex,
+    threshold: float,
+) -> tuple[BackupCandidate | None, bool]:
+    exact_matches = backup_index.streams_by_key.get(primary_key)
+    if exact_matches:
+        return exact_matches[0], False
+
+    best_candidate: BackupCandidate | None = None
+    best_score = 0.0
+
+    for candidate in backup_index.candidates:
+        score = channel_name_match_score(primary_key, candidate)
+        if score > best_score:
+            best_score = score
+            best_candidate = candidate
+
+    if best_candidate and best_score >= threshold:
+        return best_candidate, True
+
+    return None, False
+
+
+def category_with_provider_suffix(category_name: str, provider_name: str) -> str:
+    return f"{category_name} | {provider_name}"
+
+
+def get_stream_id(stream: dict[str, Any], stream_type: str) -> str | None:
+    """Return the best stream ID field for the Xtream item."""
+    if stream_type == SERIES_TYPE:
+        value = stream.get("series_id") or stream.get("id") or stream.get("stream_id")
+    else:
+        value = stream.get("stream_id") or stream.get("id") or stream.get("series_id")
+
+    return str(value) if value is not None else None
+
+
 def print_categories(
     client: XtreamClient,
     stream_types: list[str],
@@ -291,7 +591,7 @@ def stream_entry(
     provider_label: str | None = None,
     suffix_backup_name: bool = True,
 ) -> dict[str, Any] | None:
-    stream_id = stream.get("stream_id") or stream.get("id")
+    stream_id = get_stream_id(stream, stream_type)
     name = str(stream.get("name") or "").strip()
 
     if not stream_id or not is_valid_channel(name):
@@ -339,18 +639,28 @@ def dedupe_entries(entries: list[dict[str, Any]], mode: str) -> list[dict[str, A
     return result
 
 
+def mask_sensitive_url(url: str) -> str:
+    """Mask username/password query params when printing URLs to the terminal."""
+    parts = urlsplit(url)
+    query_pairs = []
+
+    for key, value in parse_qsl(parts.query, keep_blank_values=True):
+        if key.lower() in {"username", "password"} and value:
+            query_pairs.append((key, value[:2] + "***"))
+        else:
+            query_pairs.append((key, value))
+
+    return urlunsplit(
+        (parts.scheme, parts.netloc, parts.path, urlencode(query_pairs), parts.fragment)
+    )
+
+
 def build_epg_urls(
     args: argparse.Namespace,
     primary_client: XtreamClient,
     backup_clients: list[XtreamClient],
 ) -> list[str]:
-    """Build XMLTV URLs that will be written into the M3U header.
-
-    Default behavior:
-      - add the primary provider XMLTV URL automatically
-      - add custom --epg-url values if provided
-      - add backup provider XMLTV URLs only when --backup-epg is used
-    """
+    """Build XMLTV URLs that will be written into the M3U header."""
     if args.no_epg:
         return []
 
@@ -364,7 +674,6 @@ def build_epg_urls(
 
     epg_urls.extend(args.epg_url or [])
 
-    # Keep order but remove duplicates and empty values.
     deduped: list[str] = []
     seen: set[str] = set()
 
@@ -386,7 +695,216 @@ def print_epg_urls(epg_urls: list[str]) -> None:
 
     print("EPG XMLTV URL added to M3U:")
     for url in epg_urls:
-        print(f"  {url}")
+        print(f"  {mask_sensitive_url(url)}")
+
+
+def validate_backup_clients(backup_specs: list[BackupSpec]) -> None:
+    """Lightly validate backups that have their own username/password.
+
+    Mirror backups that reuse the primary credentials are not validated here because
+    they may be simple alternate domains for the same provider. Backups with
+    explicit credentials are likely separate providers, so we fetch live categories
+    once to confirm the account is reachable before export. XtreamClient caches
+    categories, so this does not add another request later.
+    """
+    explicit_specs = [spec for spec in backup_specs if spec.explicit_credentials]
+    if not explicit_specs:
+        return
+
+    print("Validating explicit-credential backup providers:")
+    for spec in explicit_specs:
+        provider = spec.client.provider
+        categories = spec.client.categories(LIVE_TYPE)
+        if categories:
+            print(f"  {provider.name}: OK ({len(categories)} live categories)")
+        else:
+            print(
+                f"  {provider.name}: warning - no live categories returned. "
+                "Check credentials/server if this backup adds nothing."
+            )
+
+
+def build_backup_indexes(
+    args: argparse.Namespace,
+    backup_clients: list[XtreamClient],
+    include_channel_patterns: list[re.Pattern[str]],
+    exclude_channel_patterns: list[re.Pattern[str]],
+) -> dict[str, BackupIndex]:
+    """Build channel-name indexes for non-mirror backup providers.
+
+    For backups with their own username/password, the stream IDs are usually
+    different from the primary provider. This index lets us use the backup's
+    real stream_id by matching channel names.
+    """
+    indexes: dict[str, BackupIndex] = {}
+
+    for backup_client in backup_clients:
+        if backup_client.provider.stream_match != "name":
+            continue
+
+        print(
+            f"Building backup name index: {backup_client.provider.name} "
+            f"({backup_client.provider.server})"
+        )
+
+        all_categories = backup_client.categories(LIVE_TYPE)
+
+        if args.backup_search_all:
+            categories = all_categories
+            if not include_channel_patterns:
+                print(
+                    f"  Warning: --backup-search-all is active for {backup_client.provider.name} "
+                    "without --channel. Category filters are bypassed for this backup."
+                )
+        else:
+            categories = filter_categories(
+                all_categories, args.category, args.exclude_category
+            )
+
+            if not categories:
+                print(
+                    f"  No matching backup categories found for {backup_client.provider.name}. "
+                    "Use --backup-search-all if this provider uses different category names."
+                )
+
+        streams_by_key: dict[str, list[BackupCandidate]] = {}
+        candidates: list[BackupCandidate] = []
+
+        for category in categories:
+            category_id_raw = category.get("category_id")
+            if category_id_raw is None:
+                continue
+
+            category_id = str(category_id_raw)
+            category_name = str(category.get("category_name", "Unknown"))
+            streams = backup_client.streams_by_category(LIVE_TYPE, category_id)
+
+            for stream in streams:
+                stream_name = str(stream.get("name") or "").strip()
+
+                if not channel_is_allowed(
+                    stream_name, include_channel_patterns, exclude_channel_patterns
+                ):
+                    continue
+
+                key = normalize_channel_key(stream_name)
+                if not key:
+                    continue
+
+                candidate = BackupCandidate(
+                    stream=stream,
+                    category_name=category_name,
+                    key=key,
+                    tokens=channel_key_tokens(key),
+                    numbers=channel_key_numbers(key),
+                )
+                streams_by_key.setdefault(key, []).append(candidate)
+                candidates.append(candidate)
+
+        indexes[backup_client.provider.name] = BackupIndex(
+            client=backup_client,
+            streams_by_key=streams_by_key,
+            candidates=candidates,
+        )
+
+        print(
+            f"  Indexed {sum(len(v) for v in streams_by_key.values())} streams "
+            f"under {len(streams_by_key)} unique names"
+        )
+
+    return indexes
+
+
+def collect_merge_backup_entries(
+    args: argparse.Namespace,
+    backup_clients: list[XtreamClient],
+    include_channel_patterns: list[re.Pattern[str]],
+    exclude_channel_patterns: list[re.Pattern[str]],
+) -> list[dict[str, Any]]:
+    """Fetch backup providers as extra providers and append their own channels.
+
+    This is different from mirror mode and name-match mode:
+      - mirror: reuse the primary provider stream IDs on another domain
+      - name: add backup alternatives only when the backup has the same channel name
+      - merge: fetch the backup provider with the same filters and add all matches
+
+    Merge mode is useful when a backup is really another subscription/provider and
+    you want its channels added to the playlist instead of mapped one-to-one.
+    """
+    merged_entries: list[dict[str, Any]] = []
+
+    for backup_client in backup_clients:
+        if backup_client.provider.stream_match != "merge":
+            continue
+
+        print(
+            f"Merging backup provider channels: {backup_client.provider.name} "
+            f"({backup_client.provider.server})"
+        )
+
+        all_categories = backup_client.categories(LIVE_TYPE)
+
+        if args.backup_search_all:
+            categories = all_categories
+            if not include_channel_patterns:
+                print(
+                    f"  Warning: --backup-search-all is active for {backup_client.provider.name} "
+                    "without --channel. Category filters are bypassed for this backup."
+                )
+        else:
+            categories = filter_categories(
+                all_categories, args.category, args.exclude_category
+            )
+
+        if not categories:
+            print(
+                f"  No matching merge categories found for {backup_client.provider.name}. "
+                "Use --backup-search-all to include all backup categories."
+            )
+            continue
+
+        provider_count = 0
+
+        for category in categories:
+            category_id_raw = category.get("category_id")
+            if category_id_raw is None:
+                continue
+
+            category_id = str(category_id_raw)
+            category_name = str(category.get("category_name", "Unknown"))
+            group_name = category_with_provider_suffix(
+                category_name, backup_client.provider.name
+            )
+
+            streams = backup_client.streams_by_category(LIVE_TYPE, category_id)
+
+            for stream in streams:
+                stream_name = str(stream.get("name") or "").strip()
+                if not channel_is_allowed(
+                    stream_name, include_channel_patterns, exclude_channel_patterns
+                ):
+                    continue
+
+                entry = stream_entry(
+                    backup_client,
+                    stream,
+                    group_name,
+                    LIVE_TYPE,
+                    args.container,
+                    provider_label=backup_client.provider.name,
+                    suffix_backup_name=args.backup_mode == "suffix",
+                )
+
+                if entry:
+                    merged_entries.append(entry)
+                    provider_count += 1
+
+        print(
+            f"  Added {provider_count} merged channels from "
+            f"{backup_client.provider.name}"
+        )
+
+    return merged_entries
 
 
 def export_live(
@@ -408,11 +926,17 @@ def export_live(
         print("No matching live categories found")
         return
 
-    epg_urls = build_epg_urls(args, primary_client, backup_clients)
     include_channel_patterns = compile_patterns(args.channel)
     exclude_channel_patterns = compile_patterns(
         args.exclude_channel, smart_plain_words=True
     )
+    backup_indexes: dict[str, BackupIndex] = {}
+    if args.include_backups:
+        backup_indexes = build_backup_indexes(
+            args, backup_clients, include_channel_patterns, exclude_channel_patterns
+        )
+
+    epg_urls = build_epg_urls(args, primary_client, backup_clients)
 
     full_entries = []
     total = 0
@@ -453,11 +977,40 @@ def export_live(
                 category_entries.append(primary_entry)
 
             if args.include_backups:
+                primary_key = normalize_channel_key(stream_name)
+
                 for backup_client in backup_clients:
+                    if backup_client.provider.stream_match == "mirror":
+                        backup_entry = stream_entry(
+                            backup_client,
+                            stream,
+                            category_name,
+                            LIVE_TYPE,
+                            args.container,
+                            provider_label=backup_client.provider.name,
+                            suffix_backup_name=args.backup_mode == "suffix",
+                        )
+                        if backup_entry:
+                            category_entries.append(backup_entry)
+                        continue
+
+                    backup_index = backup_indexes.get(backup_client.provider.name)
+                    if not backup_index:
+                        continue
+
+                    match, fuzzy = find_best_backup_match(
+                        primary_key,
+                        backup_index,
+                        args.backup_name_threshold,
+                    )
+                    if not match:
+                        backup_index.missed += 1
+                        continue
+
                     backup_entry = stream_entry(
                         backup_client,
-                        stream,
-                        category_name,
+                        match.stream,
+                        category_name or match.category_name,
                         LIVE_TYPE,
                         args.container,
                         provider_label=backup_client.provider.name,
@@ -465,6 +1018,9 @@ def export_live(
                     )
                     if backup_entry:
                         category_entries.append(backup_entry)
+                        backup_index.matched += 1
+                        if fuzzy:
+                            backup_index.fuzzy_matched += 1
 
         category_entries = dedupe_entries(category_entries, args.dedupe)
         full_entries.extend(category_entries)
@@ -482,10 +1038,36 @@ def export_live(
                     output_dir / "m3u" / f"{safe_category}.m3u",
                     category_entries,
                     epg_urls,
+                    args.epg_header_mode,
                 )
 
             print(f"Wrote {len(category_entries):5d} → {category_name}")
             total += len(category_entries)
+
+    if args.include_backups:
+        merge_entries = collect_merge_backup_entries(
+            args, backup_clients, include_channel_patterns, exclude_channel_patterns
+        )
+        merge_entries = dedupe_entries(merge_entries, args.dedupe)
+
+        if merge_entries:
+            full_entries.extend(merge_entries)
+
+            if not args.full:
+                if args.txt:
+                    txt_lines = [
+                        f"{entry['display_name']}, {entry['url']}"
+                        for entry in merge_entries
+                    ]
+                    write_txt(output_dir / "txt" / "backup_merged.txt", txt_lines)
+
+                if args.m3u:
+                    write_m3u(
+                        output_dir / "m3u" / "backup_merged.m3u",
+                        merge_entries,
+                        epg_urls,
+                        args.epg_header_mode,
+                    )
 
     full_entries = dedupe_entries(full_entries, args.dedupe)
 
@@ -498,12 +1080,18 @@ def export_live(
 
         if args.m3u:
             m3u_path = output_dir / "all_live.m3u"
-            write_m3u(m3u_path, full_entries, epg_urls)
+            write_m3u(m3u_path, full_entries, epg_urls, args.epg_header_mode)
             print(f"Wrote M3U file: {m3u_path}")
             print_epg_urls(epg_urls)
 
         total = len(full_entries)
         print(f"Wrote full live playlist → {total} channels")
+
+    for index in backup_indexes.values():
+        print(
+            f"Backup name-match summary for {index.client.provider.name}: "
+            f"matched={index.matched}, fuzzy={index.fuzzy_matched}, missed={index.missed}"
+        )
 
     print(f"\nTotal exported live channels: {total}")
 
@@ -589,21 +1177,41 @@ Examples:
   python main.py --list-categories --live
   python main.py --m3u --full --category sport
   python main.py --m3u --full --category "sport|football|f1|boxing"
-  python main.py --m3u --full --category sport --exclude-category "adult|xxx"
   python main.py --m3u --full --category sport --exclude-category sd --exclude-channel sd
   python main.py --m3u --full --category sport --channel "sky sports|tnt|dazn"
-  python main.py --m3u --full --category sport
   python main.py --m3u --full --category sport --epg-url "https://example.com/epg.xml"
   python main.py --m3u --full --category sport --backup-server http://backup:8080 --include-backups
+  python main.py --m3u --full --category sport --backup-server "http://other:80|user|pass|Other Provider" --include-backups
+  python main.py --m3u --full --category sport --backup-match merge --backup-server "http://other:80|user|pass|Other Provider" --include-backups
+  python main.py --m3u --full --category sport --backup-server "http://other:80|user|pass|Other Provider|merge" --backup-server http://mirror-domain.com --include-backups
   python main.py --m3u --full --category sport --ask-backups --include-backups
   python main.py --m3u --full --live --vod --output playlists
 
+Backup behavior:
+  server only:
+    treated as a mirror by default; primary stream IDs are reused.
+
+  server|username|password:
+    treated as a separate provider by default; backup streams are fetched and
+    matched by normalized channel name so the backup provider's own stream IDs
+    are used.
+
+  Override globally with:
+    --backup-match auto     default behavior
+    --backup-match mirror   force mirror mode for all backups
+    --backup-match name     force name-match mode for all backups
+    --backup-match merge    fetch backup providers with the same filters and append their channels
+    --backup-name-threshold 0.82  loosen/tighten name matching for separate providers
+
+  Override one provider with a 5th field:
+    http://server:port|username|password|Provider Name|mirror
+    http://server:port|username|password|Provider Name|name
+    http://server:port|username|password|Provider Name|merge
+
+  If a separate backup provider uses very different category names, add:
+    --backup-search-all
+
 Category and channel filters are case-insensitive. Regex is supported, but plain exclude words like sd are handled safely as whole tokens.
-Backup servers are assumed to be mirrors using the same stream IDs unless you provide full credentials.
-Backup format:
-  --backup-server "http://server:port"
-  --backup-server "http://server:port|username|password"
-  --backup-server "http://server:port|username|password|Provider Name"
         """,
     )
 
@@ -685,6 +1293,12 @@ Backup format:
     epg.add_argument(
         "--backup-epg", action="store_true", help="Also add backup provider EPG URLs"
     )
+    epg.add_argument(
+        "--epg-header-mode",
+        choices=["single", "compat"],
+        default="compat",
+        help="M3U EPG header style. single writes only x-tvg-url; compat also writes url-tvg and tvg-url. Default: compat",
+    )
 
     backups = parser.add_argument_group("backup providers")
     backups.add_argument(
@@ -707,6 +1321,33 @@ Backup format:
         help="suffix adds [Backup Name] to backup channel names. duplicate keeps the same name",
     )
     backups.add_argument(
+        "--backup-match",
+        choices=["auto", "mirror", "name", "merge"],
+        default="auto",
+        help=(
+            "How to use backup providers. auto: server-only backups are mirrors; "
+            "backups with explicit username/password are matched by channel name. "
+            "merge: fetch backup providers with the same filters and append channels."
+        ),
+    )
+    backups.add_argument(
+        "--backup-search-all",
+        action="store_true",
+        help="For name/merge backups, use all backup categories instead of only categories matching --category",
+    )
+    backups.add_argument(
+        "--backup-name-threshold",
+        type=float,
+        default=0.82,
+        help="Loose name-match threshold for backup-match name. Lower finds more matches but risks wrong matches. Default: 0.82",
+    )
+    backups.add_argument(
+        "--validate-backups",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Validate backups with explicit username/password before exporting. Enabled by default",
+    )
+    backups.add_argument(
         "--dedupe",
         choices=["none", "name", "url", "name-url"],
         default="name-url",
@@ -714,6 +1355,9 @@ Backup format:
     )
 
     args = parser.parse_args()
+
+    if not 0.0 <= args.backup_name_threshold <= 1.0:
+        parser.error("--backup-name-threshold must be between 0.0 and 1.0")
 
     if not (args.live or args.vod or args.series):
         args.live = True
@@ -746,10 +1390,29 @@ def main() -> None:
         if args.ask_backups:
             backup_values.extend(prompt_backup_servers())
 
-        backup_clients = [
-            XtreamClient(provider_from_string(value, username, password, index))
+        backup_match = normalize_backup_match_arg(str(args.backup_match))
+        backup_specs = [
+            provider_from_string(value, username, password, index, backup_match)
             for index, value in enumerate(backup_values, start=1)
         ]
+        backup_clients = [spec.client for spec in backup_specs]
+
+        if backup_clients:
+            print("Backup providers:")
+            for spec in backup_specs:
+                provider = spec.client.provider
+                reason = (
+                    "explicit credentials"
+                    if spec.explicit_credentials
+                    else "same credentials"
+                )
+                print(
+                    f"  {provider.name}: {provider.server} "
+                    f"mode={provider.stream_match} ({reason})"
+                )
+
+            if args.validate_backups:
+                validate_backup_clients(backup_specs)
 
         stream_types = []
         if args.live:

@@ -1,66 +1,56 @@
-# Xtream M3U Downloader
+# XtreamM3uDownloader
 
-Advanced Xtream Codes playlist exporter for generating TXT and M3U playlists from a provider account.
+Advanced Xtream Codes playlist exporter for live TV, VOD, and series playlists.
 
-It supports:
+This tool can export filtered TXT/M3U playlists from an Xtream Codes account, add XMLTV/EPG URLs to M3U headers, remove unwanted categories/channels, and combine backup providers in several different ways.
 
-- Live TV, VOD, and series exports
-- Full playlist output or split-by-category output
-- Category filtering, for example Sports only
-- M3U output with EPG metadata
-- Custom EPG URLs
-- Backup provider URLs
-- Optional duplicate backup entries
-- Basic channel deduplication
-- Request retries and timeouts
-- `.env` credentials
-- A proper `--help` command
+## Features
 
-> Use this only with providers/accounts you are allowed to access.
+- Live TV, VOD, and series category export
+- TXT and M3U output
+- Full live playlist or per-category live files
+- Category include/exclude filters
+- Channel include/exclude filters
+- Friendly whole-token excludes such as `--exclude-channel sd`
+- M3U XMLTV/EPG header support
+- Backup providers in `auto`, `mirror`, `name`, or `merge` mode
+- Looser backup name matching with a configurable threshold
+- Merged provider category labels as `Category Name | Provider Name`
+- Per-backup mode override
+- Backup validation for providers with their own username/password
+- Dedupe modes for names, URLs, or both
+- Retry and timeout handling for slow Xtream APIs
+- Safer terminal logs that mask EPG username/password values
 
----
+## Install
 
-## 1. Project files
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install requests python-dotenv
+```
 
-Your project should look like this:
+Every new terminal session needs the virtual environment activated again:
+
+```bash
+source .venv/bin/activate
+```
+
+## Project files
+
+Expected project layout:
 
 ```text
 XtreamM3uDownloader/
 ├── main.py
 ├── urls.py
 ├── .env
-├── README.md
-└── requirements.txt
+└── README.md
 ```
 
----
+## Environment file
 
-## 2. Install requirements
-
-Create and activate a virtual environment:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-```
-
-Install dependencies:
-
-```bash
-pip install requests python-dotenv
-```
-
-Optional, save dependencies:
-
-```bash
-pip freeze > requirements.txt
-```
-
----
-
-## 3. `.env` setup
-
-Create a `.env` file in the project root:
+Create `.env` in the project root:
 
 ```env
 SERVER=http://your-server:port
@@ -68,478 +58,1070 @@ USERNAME=your_username
 PASSWORD=your_password
 ```
 
-Optional backup servers can also be stored in `.env`:
+Optional backup providers can also be stored in `.env`:
 
 ```env
-BACKUP_SERVERS=http://backup1:8080,http://backup2:8080
+BACKUP_SERVERS=http://mirror-domain.com,http://other-provider.com:80|other_user|other_pass|Other Provider|merge
 ```
 
-Backup servers with their own credentials use this format:
+Do not commit `.env` to Git.
 
-```env
-BACKUP_SERVERS=http://backup1:8080|user1|pass1|Backup 1,http://backup2:8080|user2|pass2|Backup 2
-```
-
-Do not commit `.env` to GitHub. Add this to `.gitignore`:
+Recommended `.gitignore` entry:
 
 ```gitignore
 .env
-.venv/
 output/
 prev_output/
 ```
 
----
-
-## 4. Basic usage
-
-Show help:
+## Help command
 
 ```bash
 python main.py --help
 ```
 
-By default, if you do not choose `--live`, `--vod`, or `--series`, the script exports live TV.
+## Important defaults
 
-By default, if you do not choose `--txt` or `--m3u`, the script exports TXT.
-
-Default command:
+If you run the script with no media type:
 
 ```bash
 python main.py
 ```
 
-This exports live TV as TXT files.
-
----
-
-## 5. List categories
-
-List live categories:
-
-```bash
-python main.py --list-categories --live
-```
-
-List VOD categories:
-
-```bash
-python main.py --list-categories --vod
-```
-
-List series categories:
-
-```bash
-python main.py --list-categories --series
-```
-
-List only matching categories:
-
-```bash
-python main.py --list-categories --live --category sport
-```
-
----
-
-## 6. Export M3U playlist
-
-Export live TV as M3U split by category:
-
-```bash
-python main.py --m3u --live
-```
-
-Export live TV as one full M3U playlist:
-
-```bash
-python main.py --m3u --full --live
-```
-
-Because live is the default, this also works:
-
-```bash
-python main.py --m3u --full
-```
-
-Output file:
+it defaults to:
 
 ```text
-output/all_live.m3u
+--live
 ```
 
----
-
-## 7. Export Sports only
-
-Export only categories containing `sport`:
+If you do not specify an output format:
 
 ```bash
-python main.py --m3u --full --category sport
+python main.py --live
 ```
 
-Export sports, football, F1, and boxing categories:
+it defaults to:
+
+```text
+--txt
+```
+
+So this:
 
 ```bash
-python main.py --m3u --full --category "sport|football|f1|boxing"
+python main.py --category sport
 ```
 
-Exclude adult categories:
+means:
 
 ```bash
-python main.py --m3u --full --category sport --exclude-category "adult|xxx|18+"
+python main.py --live --txt --category sport
 ```
 
-Exclude SD categories and SD channels:
+To create an M3U, always include:
+
+```bash
+--m3u
+```
+
+To create both TXT and M3U, include both:
+
+```bash
+--txt --m3u
+```
+
+## Argument reference
+
+### Authentication arguments
+
+| Argument | Value | Purpose |
+|---|---|---|
+| `--server` | URL | Xtream server URL. Overrides `SERVER` in `.env`. |
+| `--username` | text | Xtream username. Overrides `USERNAME` in `.env`. |
+| `--password` | text | Xtream password. Overrides `PASSWORD` in `.env`. |
+
+Example without `.env`:
 
 ```bash
 python main.py --m3u --full \
-  --category "sport|football|world cup|ireland|^IE\||now tv|news|general|tnt" \
-  --exclude-category sd \
-  --exclude-channel sd
+  --server "http://server:port" \
+  --username "my_user" \
+  --password "my_pass" \
+  --category sport
 ```
 
-You do **not** need to type the long regex for SD anymore. For exclude filters, plain words like `sd` are treated as a separate word/token, so `--exclude-channel sd` matches `TNT Sport SD` but does not match random letters inside a bigger word.
+### Media selection arguments
 
-Only include channels matching a name pattern:
+| Argument | Purpose |
+|---|---|
+| `--live` | Export live TV. Default when no media type is provided. |
+| `--vod` | Export movies/VOD categories. |
+| `--series` | Export series categories. |
+
+You can combine them:
 
 ```bash
-python main.py --m3u --full --category sport --channel "sky sports|tnt|dazn"
+python main.py --m3u --live --vod --series --output output/all_media
 ```
 
-Category and channel filters are case-insensitive. Regex is supported, but plain exclude words like `sd` are handled safely.
+### Output format arguments
 
-You can also use multiple `--category` flags:
+| Argument | Purpose |
+|---|---|
+| `--txt` | Write TXT playlist files. Default when no output format is provided. |
+| `--m3u` | Write M3U playlist files. |
+| `--txt --m3u` | Write both TXT and M3U files. |
+
+### Output layout arguments
+
+| Argument | Value | Purpose |
+|---|---|---|
+| `--full` | none | For live TV, write one combined live playlist. |
+| `--output` | directory | Base output folder. Default: `output`. |
+| `--keep-prev` | none | Do not rotate/delete previous output folder. |
+| `--container` | `ts` or `m3u8` | Live stream URL extension. Default: `ts`. |
+
+`--full` currently affects live TV export. VOD and series currently write category folders.
+
+### Filter arguments
+
+| Argument | Can repeat? | Purpose |
+|---|---:|---|
+| `--category` | yes | Include categories matching this text or regex. |
+| `--exclude-category` | yes | Exclude categories matching this text or regex. Plain words like `sd` match as whole tokens. |
+| `--channel` | yes | Include channels/streams matching this text or regex. |
+| `--exclude-channel` | yes | Exclude channels/streams matching this text or regex. Plain words like `sd` match as whole tokens. |
+| `--list-categories` | no | Print matching categories and exit. |
+
+Filters are case-insensitive.
+
+Repeated filters are OR-style within that include/exclude group. These are equivalent:
 
 ```bash
-python main.py --m3u --full --category sport --category football
+--category sport --category football --category news
 ```
 
----
+```bash
+--category "sport|football|news"
+```
 
-## 8. EPG support
+Plain excludes such as this:
 
-For M3U output, the script automatically adds the provider EPG URL:
+```bash
+--exclude-channel sd
+```
+
+are treated safely as whole tokens, so you do not need to write a long regex.
+
+### EPG/XMLTV arguments
+
+| Argument | Value | Purpose |
+|---|---|---|
+| `--no-epg` | none | Do not write any XMLTV/EPG URL into M3U header. |
+| `--auto-epg` | none | Add the primary provider `xmltv.php` URL. Enabled by default. |
+| `--no-auto-epg` | none | Do not automatically add the primary provider XMLTV URL. |
+| `--epg-url` | URL | Add a custom XMLTV URL. Can be used multiple times. |
+| `--backup-epg` | none | Add backup provider XMLTV URLs too. |
+| `--epg-header-mode` | `single` or `compat` | `single` writes only `x-tvg-url`; `compat` writes `x-tvg-url`, `url-tvg`, and `tvg-url`. Default: `compat`. |
+
+The XMLTV guide is not embedded inside the M3U. The M3U points to it in the first line.
+
+`single` header example:
 
 ```m3u
 #EXTM3U x-tvg-url="http://server/xmltv.php?username=USER&password=PASS"
 ```
 
-Each channel entry can include metadata like:
+`compat` header example:
 
 ```m3u
-#EXTINF:-1 tvg-id="channel-id" tvg-name="Channel Name" tvg-logo="logo-url" group-title="Sports",Channel Name
-http://server/live/user/pass/123.ts
+#EXTM3U x-tvg-url="http://server/xmltv.php?username=USER&password=PASS" url-tvg="http://server/xmltv.php?username=USER&password=PASS" tvg-url="http://server/xmltv.php?username=USER&password=PASS"
 ```
 
-Disable automatic EPG:
+### Backup arguments
 
-```bash
-python main.py --m3u --full --no-epg
-```
+| Argument | Value | Purpose |
+|---|---|---|
+| `--backup-server` | backup string | Add a backup provider. Can be used multiple times. |
+| `--ask-backups` | none | Prompt for backup providers interactively. |
+| `--include-backups` | none | Actually add backup channels to live output. Required for backup channels. |
+| `--backup-mode` | `suffix` or `duplicate` | `suffix` adds `[Backup Name]`; `duplicate` keeps same display names. Default: `suffix`. |
+| `--backup-match` | `auto`, `mirror`, `name`, `merge` | Controls how backup providers are used. Default: `auto`. |
+| `--backup-search-all` | none | For name/merge backups, search all backup categories instead of matching backup categories by `--category`. |
+| `--backup-name-threshold` | `0.82` | Loosen/tighten fuzzy name matching for `name` backups. Lower finds more matches but can risk wrong matches. |
+| `--validate-backups` | none | Validate explicit-credential backups before export. Enabled by default. |
+| `--no-validate-backups` | none | Skip explicit-credential backup validation. |
+| `--dedupe` | `none`, `name`, `url`, `name-url` | Remove duplicates. Default: `name-url`. |
 
-Add your own custom EPG URL:
+Backups are applied to live TV. VOD and series currently use the primary provider only.
 
-```bash
-python main.py --m3u --full --epg-url "https://example.com/epg.xml"
-```
+## Backup provider formats
 
-Add multiple EPG URLs:
-
-```bash
-python main.py --m3u --full \
-  --epg-url "https://example.com/epg1.xml" \
-  --epg-url "https://example.com/epg2.xml"
-```
-
-Add backup provider EPG URLs too:
-
-```bash
-python main.py --m3u --full --backup-epg --include-backups
-```
-
----
-
-## 9. Backup servers
-
-Backup servers are useful when you want extra fallback stream URLs in the generated playlist.
-
-Important: backup servers work best when they are mirrors of the same provider/account, because the stream IDs need to match. If the backup is a totally different provider, the stream IDs may not point to the same channels.
-
-Add one backup server:
-
-```bash
-python main.py --m3u --full --category sport \
-  --backup-server "http://backup-server:8080" \
-  --include-backups
-```
-
-Add multiple backup servers:
-
-```bash
-python main.py --m3u --full --category sport \
-  --backup-server "http://backup1:8080" \
-  --backup-server "http://backup2:8080" \
-  --include-backups
-```
-
-Add backup server with different credentials:
-
-```bash
-python main.py --m3u --full --category sport \
-  --backup-server "http://backup-server:8080|username|password|Backup 1" \
-  --include-backups
-```
-
-Prompt for backup servers interactively:
-
-```bash
-python main.py --m3u --full --category sport --ask-backups --include-backups
-```
-
----
-
-## 10. Backup duplicate modes
-
-Default backup mode adds the backup provider name to the channel:
+Supported formats:
 
 ```text
-Sky Sports Main Event [Backup 1]
+http://server:port
+http://server:port|username|password
+http://server:port|username|password|Display Name
+http://server:port|username|password|Display Name|mirror
+http://server:port|username|password|Display Name|name
+http://server:port|username|password|Display Name|merge
 ```
+
+Always quote backup provider strings because `|` has special meaning in shells:
+
+```bash
+--backup-server "http://server:port|username|password|Provider Name|merge"
+```
+
+## Backup modes explained
+
+### `auto` mode
+
+Default mode.
+
+| Backup string | Auto behaviour |
+|---|---|
+| `http://mirror-domain.com` | `mirror` mode |
+| `http://other.com:80|user|pass|Other Provider` | `name` mode |
+| `http://other.com:80|user|pass|Other Provider|merge` | `merge` mode because per-backup override wins |
 
 Command:
 
 ```bash
-python main.py --m3u --full --category sport \
-  --backup-server "http://backup-server:8080" \
+python main.py --m3u --full \
+  --category sport \
+  --backup-server "http://mirror-domain.com" \
+  --backup-server "http://other-provider.com:80|user|pass|Other Provider" \
   --include-backups \
-  --backup-mode suffix
+  --backup-match auto
 ```
 
-Keep backup channels with the same name:
+### `mirror` mode
+
+Use for the same provider/account on another domain.
+
+The script reuses primary provider stream IDs and builds alternate URLs on the backup domain.
+
+Example:
 
 ```bash
-python main.py --m3u --full --category sport \
-  --backup-server "http://backup-server:8080" \
+python main.py --m3u --full \
+  --category sport \
+  --backup-server "http://mirror-domain.com" \
   --include-backups \
-  --backup-mode duplicate
+  --backup-match mirror \
+  --output output/mirror_test
 ```
 
-If you want real duplicate entries to remain, also disable dedupe:
+Per-backup mirror override:
 
 ```bash
-python main.py --m3u --full --category sport \
-  --backup-server "http://backup-server:8080" \
-  --include-backups \
-  --backup-mode duplicate \
-  --dedupe none
+python main.py --m3u --full \
+  --category sport \
+  --backup-server "http://other.com:80|user|pass|Other Provider|mirror" \
+  --include-backups
 ```
 
----
+Only force `mirror` with explicit credentials if you know stream IDs match.
 
-## 11. Deduplication modes
+### `name` mode
 
-The script supports these dedupe modes:
+Use for a different provider where you want backup alternatives for channels already in the primary playlist.
+
+The script fetches backup streams and matches by normalized channel name, then uses the backup provider's real stream IDs.
+
+Example:
+
+```bash
+python main.py --m3u --full \
+  --category sport \
+  --backup-server "http://other-provider.com:80|user|pass|Other Provider" \
+  --include-backups \
+  --backup-match name \
+  --backup-name-threshold 0.82 \
+  --dedupe url
+```
+
+After running, the summary includes exact/loose matches:
 
 ```text
-none      Keep everything
-name      Remove channels with the same name
-url       Remove channels with the same URL
-name-url  Remove only exact same name + URL combinations
+Backup name-match summary for Other Provider: matched=212, fuzzy=38, missed=1267
 ```
+
+`fuzzy` shows how many backup channels were matched by the looser matching logic.
+
+#### Tuning name matching
+
+The script normalizes channel names before matching. It ignores common noise such as `HD`, `FHD`, `UHD`, `4K`, `RAW`, `HEVC`, `VIP`, `UK`, `US`, and `IE`, and it treats common naming differences like `sport` vs `sports` as equivalent.
 
 Default:
 
 ```bash
---dedupe name-url
+--backup-name-threshold 0.82
 ```
 
-Examples:
+More matches, slightly higher risk of wrong matches:
 
 ```bash
-python main.py --m3u --full --dedupe name
+--backup-name-threshold 0.75
 ```
+
+Fewer but safer matches:
 
 ```bash
-python main.py --m3u --full --dedupe none
+--backup-name-threshold 0.90
 ```
 
----
+Keep the threshold higher if the providers have many numbered channels like `TNT Sport 1`, `TNT Sport 2`, `Sky Sports 1`, etc. The script blocks obvious number mismatches, but very low thresholds can still create bad matches.
 
-## 12. TXT output
-
-Export TXT split by category:
-
-```bash
-python main.py --txt --live
-```
-
-Export one full TXT playlist:
-
-```bash
-python main.py --txt --full --live
-```
-
-Output file:
-
-```text
-output/all_live.txt
-```
-
-TXT format:
-
-```text
-Channel Name, http://server/live/user/pass/123.ts;
-```
-
----
-
-## 13. VOD and series
-
-Export VOD:
-
-```bash
-python main.py --m3u --vod
-```
-
-Export series:
-
-```bash
-python main.py --m3u --series
-```
-
-Export live, VOD, and series:
-
-```bash
-python main.py --m3u --live --vod --series
-```
-
-VOD and series use `mkv` stream URLs by default.
-
----
-
-## 14. Output folders
-
-Default output folder:
-
-```text
-output/
-```
-
-Use a different output folder:
-
-```bash
-python main.py --m3u --full --output playlists
-```
-
-By default, the script rotates old output folders into `prev_*` folders before creating new output.
-
-Keep previous output instead:
-
-```bash
-python main.py --m3u --full --keep-prev
-```
-
----
-
-## 15. Live stream container
-
-Default live container is `ts`:
-
-```bash
-python main.py --m3u --full --container ts
-```
-
-Use `m3u8` instead:
-
-```bash
-python main.py --m3u --full --container m3u8
-```
-
----
-
-## 16. Troubleshooting
-
-### `Missing SERVER / USERNAME / PASSWORD`
-
-Create a `.env` file:
-
-```env
-SERVER=http://your-server:port
-USERNAME=your_username
-PASSWORD=your_password
-```
-
-Or pass credentials directly:
-
-```bash
-python main.py --server "http://server:port" --username "user" --password "pass" --m3u --full
-```
-
-### `Read timed out`
-
-The provider took too long to respond. The script now retries failed requests and uses separate connect/read timeouts.
-
-You may still see messages like:
-
-```text
-[TIMEOUT] Primary: live category 123 attempt 1/3
-[SKIPPED] Primary: live category 123 failed after 3 attempts
-```
-
-That means the script skipped one slow category instead of crashing.
-
-### `JSON ERROR`
-
-The provider returned invalid JSON, often because the server is down, blocked, expired, or returned an HTML error page instead of API data.
-
-### Backup links do not play
-
-Backup links only work if the backup server uses the same stream IDs. If it is a different provider, the stream IDs may not match.
-
-### M3U has duplicates
-
-Use stricter dedupe:
-
-```bash
-python main.py --m3u --full --dedupe name
-```
-
-Or keep duplicates intentionally:
-
-```bash
-python main.py --m3u --full --dedupe none
-```
-
----
-
-## 17. Recommended commands
-
-Sports full M3U with EPG:
-
-```bash
-python main.py --m3u --full --category "sport|football|f1|boxing"
-```
-
-Sports/news/custom full M3U with backups and no SD:
+Per-backup name override:
 
 ```bash
 python main.py --m3u --full \
-  --category "sport|football|world cup|ireland|^IE\||now tv|news|general|tnt" \
-  --exclude-category sd \
-  --exclude-channel sd \
-  --backup-server "http://backup1:8080" \
-  --backup-server "http://backup2:8080" \
+  --category sport \
+  --backup-server "http://other-provider.com:80|user|pass|Other Provider|name" \
+  --include-backups
+```
+
+### `merge` mode
+
+Use for a different provider where you want to add its filtered channels as extra channels/categories, not only alternatives to primary channels.
+
+Merged backup categories are labelled with the provider at the end:
+
+```text
+Original category: UK| SPORT HD
+Merged category:   UK| SPORT HD | Other Provider
+```
+
+That keeps category sorting focused on the original category name while still showing which provider the entries came from.
+
+The script fetches backup categories/streams with the same filters and appends matching backup channels.
+
+Example:
+
+```bash
+python main.py --m3u --full \
+  --category "sport|football|news" \
+  --backup-server "http://other-provider.com:80|user|pass|Other Provider" \
   --include-backups \
+  --backup-match merge \
+  --dedupe url \
+  --output output/merge_test
+```
+
+Per-backup merge override:
+
+```bash
+python main.py --m3u --full \
+  --category "sport|football|news" \
+  --backup-server "http://other-provider.com:80|user|pass|Other Provider|merge" \
+  --backup-server "http://mirror-domain.com" \
+  --include-backups \
+  --backup-match auto \
+  --dedupe url \
+  --output output/mixed_backups
+```
+
+That means:
+
+```text
+Other Provider = merge mode, uses own categories/streams
+mirror-domain.com = mirror mode, reuses primary stream IDs
+```
+
+## Output paths
+
+### Live TV with `--full`
+
+```bash
+python main.py --m3u --full --category sport --output output/custom
+```
+
+Output:
+
+```text
+output/custom/all_live.m3u
+```
+
+With TXT too:
+
+```bash
+python main.py --txt --m3u --full --category sport --output output/custom
+```
+
+Outputs:
+
+```text
+output/custom/all_live.txt
+output/custom/all_live.m3u
+```
+
+### Live TV without `--full`
+
+```bash
+python main.py --m3u --category sport --output output/custom
+```
+
+Output:
+
+```text
+output/custom/m3u/<category>.m3u
+```
+
+If merge backups are used without `--full`, merged backup channels also go here:
+
+```text
+output/custom/m3u/backup_merged.m3u
+```
+
+### VOD
+
+```bash
+python main.py --m3u --vod --category "movies|action" --output output/custom
+```
+
+Output:
+
+```text
+output/custom/vod/<category>/<category>.m3u
+```
+
+### Series
+
+```bash
+python main.py --m3u --series --category "series|netflix|prime" --output output/custom
+```
+
+Output:
+
+```text
+output/custom/series/<category>/<category>.m3u
+```
+
+## Common command recipes
+
+### List live categories
+
+```bash
+python main.py --list-categories --live
+```
+
+### List VOD categories
+
+```bash
+python main.py --list-categories --vod
+```
+
+### List series categories
+
+```bash
+python main.py --list-categories --series
+```
+
+### List matching live categories
+
+```bash
+python main.py --list-categories --live --category "sport|football|news|general"
+```
+
+### List categories but hide SD categories
+
+```bash
+python main.py --list-categories --live \
+  --category "sport|football|news" \
+  --exclude-category sd
+```
+
+### Basic live M3U full playlist
+
+```bash
+python main.py --m3u --full --category sport
+```
+
+### Basic live TXT full playlist
+
+```bash
+python main.py --txt --full --category sport
+```
+
+### Live TXT and M3U full playlist
+
+```bash
+python main.py --txt --m3u --full --category sport
+```
+
+### Per-category live M3U files
+
+```bash
+python main.py --m3u --category sport --output output/by_category
+```
+
+### Your custom sports/news/general playlist
+
+```bash
+python main.py --m3u --full \
+  --category "sport|football|world cup|ireland|now tv sport|news|general|tnt" \
+  --exclude-category "sd|max|flo|bally|sky sport+" \
+  --exclude-channel sd \
+  --output output/custom
+```
+
+### Include all Ireland `IE|` categories too
+
+Use `^IE\|` to match category names that start with `IE|`:
+
+```bash
+python main.py --m3u --full \
+  --category "sport|football|world cup|ireland|^IE\||now tv sport|news|general|tnt" \
+  --exclude-category "sd|max|flo|bally|sky sport+" \
+  --exclude-channel sd \
+  --output output/custom
+```
+
+### Use M3U8 live links instead of TS
+
+```bash
+python main.py --m3u --full \
+  --category sport \
+  --container m3u8 \
+  --output output/m3u8
+```
+
+### Keep previous output instead of rotating it
+
+```bash
+python main.py --m3u --full \
+  --category sport \
+  --keep-prev \
+  --output output/custom
+```
+
+### Include only certain channel names
+
+```bash
+python main.py --m3u --full \
+  --category sport \
+  --channel "sky sports|tnt|dazn|espn" \
+  --output output/selected_channels
+```
+
+### Exclude more than one category
+
+Repeated style:
+
+```bash
+python main.py --m3u --full \
+  --category sport \
+  --exclude-category sd \
+  --exclude-category kids \
+  --exclude-category cinema
+```
+
+Regex group style:
+
+```bash
+python main.py --m3u --full \
+  --category sport \
+  --exclude-category "sd|kids|cinema|movies|music|documentary"
+```
+
+### Exclude SD categories and SD channels
+
+```bash
+python main.py --m3u --full \
+  --category sport \
+  --exclude-category sd \
+  --exclude-channel sd
+```
+
+### Disable EPG header
+
+```bash
+python main.py --m3u --full \
+  --category sport \
+  --no-epg
+```
+
+### Use a clean single EPG header
+
+```bash
+python main.py --m3u --full \
+  --category sport \
+  --epg-header-mode single
+```
+
+### Use compatibility EPG header
+
+This is the default, but you can set it explicitly:
+
+```bash
+python main.py --m3u --full \
+  --category sport \
+  --epg-header-mode compat
+```
+
+### Use only a custom EPG URL
+
+```bash
+python main.py --m3u --full \
+  --category sport \
+  --no-auto-epg \
+  --epg-url "https://example.com/epg.xml"
+```
+
+### Use automatic EPG plus a custom EPG URL
+
+```bash
+python main.py --m3u --full \
+  --category sport \
+  --epg-url "https://example.com/extra-epg.xml"
+```
+
+### Include backup EPG URLs
+
+```bash
+python main.py --m3u --full \
+  --category sport \
+  --backup-server "http://mirror-domain.com" \
+  --include-backups \
+  --backup-epg
+```
+
+### Mirror backup domain
+
+```bash
+python main.py --m3u --full \
+  --category sport \
+  --backup-server "http://mirror-domain.com" \
+  --include-backups \
+  --backup-match auto \
+  --dedupe url
+```
+
+### Different provider as backup alternatives by name
+
+```bash
+python main.py --m3u --full \
+  --category sport \
+  --backup-server "http://other-provider.com:80|user|pass|Other Provider" \
+  --include-backups \
+  --backup-match auto \
+  --dedupe url
+```
+
+### Different provider as extra merged channels
+
+```bash
+python main.py --m3u --full \
+  --category "sport|football|news" \
+  --backup-server "http://other-provider.com:80|user|pass|Other Provider|merge" \
+  --include-backups \
+  --backup-match auto \
+  --dedupe url \
+  --output output/merged
+```
+
+### Mixed mirror + merge backups
+
+```bash
+python main.py --m3u --full \
+  --category "sport|football|world cup|ireland|now tv sport|news|general|tnt" \
+  --exclude-category "sd|max|flo|bally|sky sport+" \
+  --exclude-channel sd \
+  --backup-server "http://other-provider.com:80|user|pass|Other Provider|merge" \
+  --backup-server "http://mirror-domain.com" \
+  --include-backups \
+  --backup-match auto \
   --backup-mode suffix \
   --dedupe url \
   --output output/custom
 ```
 
-Sports full M3U with custom EPG and no duplicates by name:
+### Same display names for backups
 
 ```bash
-python main.py --m3u --full --category "sport|football|f1|boxing" \
-  --epg-url "https://example.com/epg.xml" \
+python main.py --m3u --full \
+  --category sport \
+  --backup-server "http://mirror-domain.com" \
+  --include-backups \
+  --backup-mode duplicate \
+  --dedupe url
+```
+
+### Add backup suffixes
+
+This is the default:
+
+```bash
+python main.py --m3u --full \
+  --category sport \
+  --backup-server "http://mirror-domain.com" \
+  --include-backups \
+  --backup-mode suffix
+```
+
+Example display names:
+
+```text
+Sky Sports Main Event
+Sky Sports Main Event [Backup 1]
+```
+
+### Search all backup categories
+
+Use this when backup category names do not match the primary provider's category names.
+
+```bash
+python main.py --m3u --full \
+  --category "sport|football|news" \
+  --channel "sky sports|tnt|dazn|espn" \
+  --backup-server "http://other-provider.com:80|user|pass|Other Provider|merge" \
+  --include-backups \
+  --backup-search-all \
+  --dedupe url
+```
+
+Use `--backup-search-all` carefully. Without `--channel`, it may add too many backup channels.
+
+### Skip backup validation
+
+```bash
+python main.py --m3u --full \
+  --category sport \
+  --backup-server "http://other-provider.com:80|user|pass|Other Provider|merge" \
+  --include-backups \
+  --no-validate-backups
+```
+
+### Prompt for backup providers
+
+```bash
+python main.py --m3u --full \
+  --category sport \
+  --ask-backups \
+  --include-backups
+```
+
+### Dedupe by URL
+
+Best when you want the same channel name from multiple providers but do not want identical URLs repeated.
+
+```bash
+python main.py --m3u --full \
+  --category sport \
+  --include-backups \
+  --dedupe url
+```
+
+### Dedupe by name
+
+Keeps only one entry per channel name.
+
+```bash
+python main.py --m3u --full \
+  --category sport \
   --dedupe name
 ```
+
+### No dedupe
+
+Useful for testing.
+
+```bash
+python main.py --m3u --full \
+  --category sport \
+  --include-backups \
+  --dedupe none
+```
+
+### Export VOD M3U
+
+```bash
+python main.py --m3u --vod \
+  --category "movies|cinema|action|comedy" \
+  --exclude-category "kids|xxx" \
+  --output output/custom
+```
+
+### Export VOD TXT
+
+```bash
+python main.py --txt --vod \
+  --category "movies|cinema|action" \
+  --output output/custom
+```
+
+### Export series M3U
+
+```bash
+python main.py --m3u --series \
+  --category "series|netflix|prime|apple|hbo" \
+  --exclude-category "kids|xxx" \
+  --output output/custom
+```
+
+### Export live + VOD + series
+
+```bash
+python main.py --m3u --live --vod --series \
+  --category "sport|football|news|movies|series|netflix|prime" \
+  --exclude-category "sd|kids|xxx" \
+  --exclude-channel sd \
+  --output output/all_media
+```
+
+## Argument combination guide
+
+### Media type combinations
+
+| Command flags | Result |
+|---|---|
+| no media flag | Live TV only. Same as `--live`. |
+| `--live` | Live TV only. |
+| `--vod` | VOD only. |
+| `--series` | Series only. |
+| `--live --vod` | Live TV and VOD. |
+| `--live --series` | Live TV and series. |
+| `--vod --series` | VOD and series. |
+| `--live --vod --series` | All supported media types. |
+
+### Output format combinations
+
+| Command flags | Result |
+|---|---|
+| no output flag | TXT only. Same as `--txt`. |
+| `--txt` | TXT only. |
+| `--m3u` | M3U only. |
+| `--txt --m3u` | TXT and M3U. |
+
+### Live layout combinations
+
+| Command flags | Result |
+|---|---|
+| `--live --m3u --full` | `output/all_live.m3u` or `<output>/all_live.m3u`. |
+| `--live --txt --full` | `output/all_live.txt` or `<output>/all_live.txt`. |
+| `--live --m3u` without `--full` | Per-category M3U files under `<output>/m3u/`. |
+| `--live --txt` without `--full` | Per-category TXT files under `<output>/txt/`. |
+
+### Filter combinations
+
+| Combination | Meaning |
+|---|---|
+| `--category X` | Only categories matching `X`. |
+| `--exclude-category X` | All categories except ones matching `X`. |
+| `--category X --exclude-category Y` | Include categories matching `X`, then remove categories matching `Y`. |
+| `--channel X` | Only streams whose names match `X`. |
+| `--exclude-channel X` | Remove streams whose names match `X`. |
+| `--category X --channel Y` | Category must match `X`, and channel name must match `Y`. |
+| `--exclude-category sd --exclude-channel sd` | Remove SD categories and SD channels. |
+
+### EPG combinations
+
+| Combination | Meaning |
+|---|---|
+| `--m3u` | Auto EPG is added by default for live M3U. |
+| `--m3u --no-epg` | No EPG header. |
+| `--m3u --no-auto-epg --epg-url URL` | Only custom EPG URL. |
+| `--m3u --epg-url URL` | Primary auto EPG plus custom URL. |
+| `--m3u --backup-epg` | Primary auto EPG plus backup EPG URLs. |
+| `--epg-header-mode single` | Only `x-tvg-url`. |
+| `--epg-header-mode compat` | `x-tvg-url`, `url-tvg`, and `tvg-url`. |
+
+### Backup combinations
+
+| Combination | Meaning |
+|---|---|
+| `--backup-server ...` without `--include-backups` | Backup is parsed/validated but backup channels are not added. |
+| `--backup-server ... --include-backups` | Add backup channels according to backup mode. |
+| server-only backup + `--backup-match auto` | Mirror mode. |
+| explicit username/password backup + `--backup-match auto` | Name-match mode. |
+| any backup + `--backup-match mirror` | Force mirror mode globally. |
+| any backup + `--backup-match name` | Force name-match mode globally. |
+| any backup + `--backup-match merge` | Force merge mode globally. |
+| backup string with 5th field `|mirror` | Force mirror for that backup only. |
+| backup string with 5th field `|name` | Force name-match for that backup only. |
+| backup string with 5th field `|merge` | Force merge for that backup only. |
+| `--backup-mode suffix` | Add `[Backup Name]` to backup display names. |
+| `--backup-mode duplicate` | Keep backup display names identical to original. |
+| `--backup-search-all` | For name/merge backups, do not require backup category names to match the primary filters. |
+
+## Checking output
+
+List output files:
+
+```bash
+ls -lh output/custom
+```
+
+Open output folder on macOS:
+
+```bash
+open output/custom
+```
+
+Check M3U header:
+
+```bash
+head -1 output/custom/all_live.m3u
+```
+
+Count total channels:
+
+```bash
+grep -c '^#EXTINF' output/custom/all_live.m3u
+```
+
+Count backup entries by label:
+
+```bash
+grep -c '\[Backup 1\]' output/custom/all_live.m3u
+```
+
+Check for SD entries:
+
+```bash
+grep -i '^#EXTINF.*sd' output/custom/all_live.m3u | head -20
+```
+
+Check a backup provider URL appears:
+
+```bash
+grep -c 'other-provider.com' output/custom/all_live.m3u
+```
+
+Preview first channels:
+
+```bash
+head -40 output/custom/all_live.m3u
+```
+
+## Troubleshooting
+
+### I expected an M3U but only got TXT
+
+You probably did not pass `--m3u`.
+
+```bash
+python main.py --m3u --full --category sport
+```
+
+### I expected VOD/series but only got live
+
+If no media type is provided, the script defaults to live. Add `--vod` or `--series`.
+
+```bash
+python main.py --m3u --vod --category movies
+python main.py --m3u --series --category series
+```
+
+### Backup provider adds nothing
+
+For a separate provider, try merge mode:
+
+```bash
+--backup-server "http://other-provider.com:80|user|pass|Other Provider|merge"
+```
+
+If category names are different, add:
+
+```bash
+--backup-search-all
+```
+
+For safer results with `--backup-search-all`, also add a channel filter:
+
+```bash
+--channel "sky sports|tnt|dazn|espn"
+```
+
+### Backup provider URLs are wrong
+
+Do not use mirror mode for a different provider unless stream IDs match. Use name or merge mode.
+
+```bash
+--backup-match name
+```
+
+or:
+
+```bash
+--backup-match merge
+```
+
+### EPG header is missing
+
+Make sure you used `--m3u` and did not use `--no-epg`.
+
+```bash
+head -1 output/custom/all_live.m3u
+```
+
+### EPG works in one player but not another
+
+Try compatibility mode:
+
+```bash
+--epg-header-mode compat
+```
+
+Or try single mode:
+
+```bash
+--epg-header-mode single
+```
+
+### Too many backup channels were added
+
+Avoid `--backup-search-all`, or add stricter filters:
+
+```bash
+--category "sport|football|news" --channel "sky sports|tnt|dazn|espn"
+```
+
+### SD channels still appear
+
+Use both category and channel excludes:
+
+```bash
+--exclude-category sd --exclude-channel sd
+```
+
+Then check:
+
+```bash
+grep -i '^#EXTINF.*sd' output/custom/all_live.m3u | head -20
+```
+
+### Provider times out
+
+The script retries requests and uses separate connect/read timeouts. If a provider is very slow, re-run the command or narrow the category filter.
+
+## Security notes
+
+- Do not share commands or logs containing real IPTV usernames/passwords.
+- The script masks EPG credentials in terminal logs, but stream URLs inside M3U files necessarily contain credentials.
+- Keep generated playlists private.
+- Add `.env` and `output/` to `.gitignore`.
+
+## Recommended command for mixed-provider live playlist
+
+This is the polished setup for one primary provider, one separate backup provider that should add more channels, and one mirror domain:
+
+```bash
+python main.py --m3u --full \
+  --category "sport|football|world cup|ireland|^IE\||now tv sport|news|general|tnt" \
+  --exclude-category "sd|max|flo|bally|sky sport+" \
+  --exclude-channel sd \
+  --backup-server "http://other-provider.com:80|USER|PASS|Other Provider|merge" \
+  --backup-server "http://mirror-domain.com" \
+  --include-backups \
+  --backup-match auto \
+  --backup-mode suffix \
+  --dedupe url \
+  --epg-header-mode compat \
+  --output output/custom
+```
+
 
